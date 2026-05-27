@@ -7,8 +7,9 @@ Consumers reference them by the moving major tag `@v1` from a `pipeline.yml` orc
 toggles stages at runtime via the `PIPELINE_CONFIG` Actions variable. See
 `docs/PIPELINE_PLAYBOOK.md` §17 and `docs/GITHUB_DOTFILES_REPO_CHECKLIST.md` in the project template.
 
-> This repo is **private**; cross-repo Actions access is enabled (Settings → Actions → General →
-> "Accessible from repositories owned by the user account"), so any `suyash21101` repo can `uses:` it.
+> This repo is **public** so it can be consumed by public *and* private repos owned by `suyash21101`
+> (a public repo cannot `uses:` a private repo's reusable workflows). It contains no secrets — the
+> module YAML only; secrets stay in GitHub/Secrets Manager and are forwarded via `secrets: inherit`.
 
 ## Modules
 
