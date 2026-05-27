@@ -1,0 +1,44 @@
+# Reusable module: Vitest unit tests + coverage gate.
+#   uses: suyash21101/.github/.github/workflows/test.yml@v1
+#   with: { coverage_min: 80 }
+#
+# `coverage_min` overrides the line/statement/function thresholds baked into the consumer's
+# vitest.config.ts, so the PIPELINE_CONFIG value is what actually governs the gate. Branch
+# coverage keeps whatever the consumer's config sets.
+name: test (module)
+
+on:
+  workflow_call:
+    inputs:
+      node_version:
+        type: string
+        required: false
+        default: "20"
+      coverage_min:
+        type: number
+        required: false
+        default: 80
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+          cache: npm
+      - run: npm ci
+      - name: Run tests with coverage (threshold from PIPELINE_CONFIG)
+        run: |
+          npx vitest run --coverage \
+            --coverage.thresholds.lines=${{ inputs.coverage_min }} \
+            --coverage.thresholds.statements=${{ inputs.coverage_min }} \
+            --coverage.thresholds.functions=${{ inputs.coverage_min }}
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage/
+          retention-days: 7

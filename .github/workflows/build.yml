@@ -1,0 +1,28 @@
+# Reusable module: production build (next build).
+#   uses: suyash21101/.github/.github/workflows/build.yml@v1
+#
+# Runs `prisma generate` before the build for projects that use Prisma; it's a no-op cost
+# otherwise. Build-time env vars (e.g. public API URLs) are wired per-environment in a later
+# phase — add them under `env:` here once the AWS stack defines them.
+name: build (module)
+
+on:
+  workflow_call:
+    inputs:
+      node_version:
+        type: string
+        required: false
+        default: "20"
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+          cache: npm
+      - run: npm ci
+      - run: npx prisma generate
+      - run: npm run build

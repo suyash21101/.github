@@ -1,0 +1,23 @@
+# Reusable module: TypeScript type check (tsc --noEmit).
+#   uses: suyash21101/.github/.github/workflows/typecheck.yml@v1
+name: typecheck (module)
+
+on:
+  workflow_call:
+    inputs:
+      node_version:
+        type: string
+        required: false
+        default: "20"
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+          cache: npm
+      - run: npm ci
+      - run: npx tsc --noEmit
