@@ -15,7 +15,7 @@ on:
         default: sonnet
     secrets:
       ANTHROPIC_API_KEY:
-        required: true
+        required: false
 
 permissions:
   contents: read
