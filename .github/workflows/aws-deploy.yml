@@ -1,0 +1,115 @@
+# Reusable module: deploy to AWS via GitHub OIDC (no long-lived keys). See docs/AWS_INFRA_SETUP.md.
+#   uses: suyash21101/.github/.github/workflows/aws-deploy.yml@v1
+#   with:
+#     environment: int            # int | uat | prod
+#     aws_region: eu-west-1
+#     role_to_assume: arn:aws:iam::<acct>:role/<env>-deploy
+#     mode: amplify               # amplify | fargate
+#     amplify_app_id: d123...      # required when mode == amplify
+#     amplify_branch: develop
+#     migrate_before_traffic: true
+#   secrets: inherit              # needs DATABASE_URL on the consumer repo (for migrations)
+#
+# OIDC trust: the deploy role's trust policy must be scoped to this repo + branch
+# (repo:OWNER/REPO:ref:refs/heads/<branch>) per AWS_INFRA_SETUP.md §6.
+name: aws-deploy (module)
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        type: string
+        required: true
+      aws_region:
+        type: string
+        required: true
+      role_to_assume:
+        type: string
+        required: true
+      mode:
+        type: string
+        required: false
+        default: amplify
+      amplify_app_id:
+        type: string
+        required: false
+        default: ""
+      amplify_branch:
+        type: string
+        required: false
+        default: ""
+      node_version:
+        type: string
+        required: false
+        default: "20"
+      migrate_before_traffic:
+        type: boolean
+        required: false
+        default: true
+    secrets:
+      DATABASE_URL:
+        required: false
+
+permissions:
+  id-token: write   # required for OIDC
+  contents: read
+
+jobs:
+  run:
+    name: Deploy (${{ inputs.environment }})
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ inputs.role_to_assume }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+          cache: npm
+
+      - name: Run DB migrations before shifting traffic
+        if: ${{ inputs.migrate_before_traffic }}
+        run: |
+          npm ci
+          npx prisma migrate deploy
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+      - name: Trigger Amplify deployment
+        if: ${{ inputs.mode == 'amplify' }}
+        run: |
+          if [ -z "${{ inputs.amplify_app_id }}" ] || [ -z "${{ inputs.amplify_branch }}" ]; then
+            echo "::error::mode=amplify requires amplify_app_id and amplify_branch"
+            exit 1
+          fi
+          JOB_ID=$(aws amplify start-job \
+            --app-id "${{ inputs.amplify_app_id }}" \
+            --branch-name "${{ inputs.amplify_branch }}" \
+            --job-type RELEASE \
+            --query 'jobSummary.jobId' --output text)
+          echo "Started Amplify job $JOB_ID; waiting for completion..."
+          while true; do
+            STATUS=$(aws amplify get-job \
+              --app-id "${{ inputs.amplify_app_id }}" \
+              --branch-name "${{ inputs.amplify_branch }}" \
+              --job-id "$JOB_ID" \
+              --query 'job.summary.status' --output text)
+            echo "Amplify job status: $STATUS"
+            case "$STATUS" in
+              SUCCEED) echo "Deploy succeeded."; break ;;
+              FAILED|CANCELLED) echo "::error::Amplify deploy $STATUS"; exit 1 ;;
+              *) sleep 15 ;;
+            esac
+          done
+
+      - name: Fargate deploy placeholder
+        if: ${{ inputs.mode == 'fargate' }}
+        run: |
+          echo "::error::Fargate deploy not yet implemented in this module (see AWS_INFRA_SETUP.md §8)."
+          exit 1
