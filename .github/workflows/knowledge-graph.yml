@@ -1,0 +1,48 @@
+# Reusable module: refresh the Graphify knowledge graph and commit the result.
+#   uses: suyash21101/.github/.github/workflows/knowledge-graph.yml@v1
+#   secrets: inherit   # needs ANTHROPIC_API_KEY on the consumer repo
+#
+# Consumer wires the trigger (push to develop / workflow_dispatch) and calls this module.
+name: knowledge-graph (module)
+
+on:
+  workflow_call:
+    inputs:
+      model:
+        type: string
+        required: false
+        default: sonnet
+    secrets:
+      ANTHROPIC_API_KEY:
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          model: ${{ inputs.model }}
+          prompt: |
+            Run /graphify . --update to refresh the knowledge graph
+            with the latest code changes.
+
+      - name: Commit graph updates
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet graphify-out/ 2>/dev/null; then
+            echo "No graph changes to commit"
+          else
+            git add graphify-out/
+            git commit -m "chore: update knowledge graph [skip ci]"
+            git push
+          fi

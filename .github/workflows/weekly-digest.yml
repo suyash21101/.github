@@ -1,0 +1,49 @@
+# Reusable module: weekly sprint digest posted to Slack.
+#   uses: suyash21101/.github/.github/workflows/weekly-digest.yml@v1
+#   secrets: inherit   # needs SLACK_WEBHOOK_URL on the consumer repo
+#
+# Consumer wires the schedule (e.g. Sunday 18:00 UTC) and calls this module. Stats come from
+# the consumer repo's issues/PRs via its GITHUB_TOKEN.
+name: weekly-digest (module)
+
+on:
+  workflow_call:
+    secrets:
+      SLACK_WEBHOOK_URL:
+        required: true
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+
+jobs:
+  run:
+    name: Weekly Sprint Digest
+    runs-on: ubuntu-latest
+    steps:
+      - name: Collect stats
+        id: stats
+        run: |
+          SINCE=$(date -d '7 days ago' +%Y-%m-%d 2>/dev/null || date -v-7d +%Y-%m-%d)
+          DONE=$(gh issue list --repo "${{ github.repository }}" --state closed --search "closed:>$SINCE" --json number | jq length)
+          IN_PROGRESS=$(gh issue list --repo "${{ github.repository }}" --label "claude-ready" --state open --json number | jq length)
+          BLOCKED=$(gh issue list --repo "${{ github.repository }}" --label "claude-blocked" --state open --json number | jq length)
+          MERGED=$(gh pr list --repo "${{ github.repository }}" --state merged --search "merged:>$SINCE" --json number | jq length)
+
+          echo "done=$DONE" >> "$GITHUB_OUTPUT"
+          echo "in_progress=$IN_PROGRESS" >> "$GITHUB_OUTPUT"
+          echo "blocked=$BLOCKED" >> "$GITHUB_OUTPUT"
+          echo "merged=$MERGED" >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Post digest to Slack
+        uses: slackapi/slack-github-action@v2.1.0
+        with:
+          webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
+          webhook-type: incoming-webhook
+          payload: |
+            {
+              "text": "📊 *Weekly Digest*\nDone: ${{ steps.stats.outputs.done }} stories | In Progress: ${{ steps.stats.outputs.in_progress }} | Blocked: ${{ steps.stats.outputs.blocked }}\nPRs merged: ${{ steps.stats.outputs.merged }}\n<https://github.com/${{ github.repository }}|View Repo>"
+            }

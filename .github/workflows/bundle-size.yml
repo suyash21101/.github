@@ -1,0 +1,51 @@
+# Reusable module: build the app and report the production bundle size (advisory).
+#   uses: suyash21101/.github/.github/workflows/bundle-size.yml@v1
+#   with: { threshold_kb: 50 }
+#
+# Advisory by design: it measures the largest first-load JS chunk and warns when it exceeds
+# `threshold_kb`, but never fails the job — wire it as a non-required check in the orchestrator.
+name: bundle-size (module)
+
+on:
+  workflow_call:
+    inputs:
+      node_version:
+        type: string
+        required: false
+        default: "20"
+      threshold_kb:
+        type: number
+        required: false
+        default: 50
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+          cache: npm
+      - run: npm ci
+      - run: npx prisma generate
+      - run: npm run build
+      - name: Measure largest first-load JS chunk
+        run: |
+          if [ ! -d .next/static ]; then
+            echo "No .next/static directory found — skipping bundle measurement."
+            exit 0
+          fi
+          # Largest single JS asset, in KB.
+          LARGEST_BYTES=$(find .next/static -name '*.js' -printf '%s\n' | sort -nr | head -1)
+          LARGEST_KB=$(( LARGEST_BYTES / 1024 ))
+          THRESHOLD=${{ inputs.threshold_kb }}
+          {
+            echo "## Bundle size (advisory)";
+            echo "Largest JS chunk: **${LARGEST_KB} KB** (threshold: ${THRESHOLD} KB)";
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$LARGEST_KB" -gt "$THRESHOLD" ]; then
+            echo "::warning::Largest JS chunk ${LARGEST_KB} KB exceeds threshold ${THRESHOLD} KB"
+          else
+            echo "Bundle within threshold."
+          fi

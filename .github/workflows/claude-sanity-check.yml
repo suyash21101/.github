@@ -1,0 +1,74 @@
+# Reusable module: post-deploy HTTP sanity checks against a live URL.
+#   uses: suyash21101/.github/.github/workflows/claude-sanity-check.yml@v1
+#   with: { target_url: https://app.example.com }
+#
+# The consumer wires the trigger (deployment_status / workflow_dispatch) and passes the
+# resolved URL as `target_url`. This module only runs the probes.
+name: claude-sanity-check (module)
+
+on:
+  workflow_call:
+    inputs:
+      target_url:
+        type: string
+        required: true
+
+jobs:
+  run:
+    name: Sanity Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wait for deployment to stabilize
+        run: sleep 10
+
+      - name: Check homepage
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" "${{ inputs.target_url }}")
+          if [ "$STATUS" -ge 500 ]; then
+            echo "FAIL: Homepage returned $STATUS"
+            exit 1
+          fi
+          echo "PASS: Homepage returned $STATUS"
+
+      - name: Check auth callback route
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" "${{ inputs.target_url }}/auth/callback")
+          if [ "$STATUS" -ge 500 ]; then
+            echo "FAIL: Auth callback returned $STATUS"
+            exit 1
+          fi
+          echo "PASS: Auth callback returned $STATUS"
+
+      - name: Check onboarding welcome
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" "${{ inputs.target_url }}/onboarding/welcome")
+          if [ "$STATUS" -ge 500 ]; then
+            echo "FAIL: Onboarding welcome returned $STATUS"
+            exit 1
+          fi
+          echo "PASS: Onboarding welcome returned $STATUS"
+
+      - name: Check static assets load
+        run: |
+          BODY=$(curl -s "${{ inputs.target_url }}")
+          if echo "$BODY" | grep -q "<!DOCTYPE html\|<html"; then
+            echo "PASS: Homepage returns valid HTML"
+          else
+            echo "FAIL: Homepage does not return valid HTML"
+            exit 1
+          fi
+
+      - name: Check response time
+        run: |
+          TIME=$(curl -s -o /dev/null -w "%{time_total}" "${{ inputs.target_url }}")
+          echo "Homepage response time: ${TIME}s"
+          if (( $(echo "$TIME > 10" | bc -l) )); then
+            echo "::warning::Homepage response time exceeds 10s"
+          fi
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Sanity Check Results" >> "$GITHUB_STEP_SUMMARY"
+          echo "Target: ${{ inputs.target_url }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Time: $(date -u)" >> "$GITHUB_STEP_SUMMARY"
