@@ -17,6 +17,7 @@ assert_contains "$F" 'manage.py migrate' "runs Django migrations"
 assert_contains "$F" 'amazon-ecs-render-task-definition' "renders new task-def revision"
 assert_contains "$F" 'amazon-ecs-deploy-task-definition' "deploys + waits for steady-state"
 assert_contains "$F" 'aws ecs run-task' "runs one-shot migration task"
+assert_contains "$F" 'setup-node' "setup-node present for amplify npm ci path"
 # The old placeholder must be gone
 assert_absent  "$F" 'Fargate deploy not yet implemented' "no fargate placeholder remains"
 # fargate-leader handled

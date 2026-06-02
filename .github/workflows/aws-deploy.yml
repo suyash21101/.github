@@ -12,8 +12,9 @@
 #     image: <acct>.dkr.ecr.ap-south-1.amazonaws.com/quantlab/web:sha-abc123
 #     migrate: true              # fargate only; runs one-shot migration before traffic
 #     migrate_command: 'python manage.py migrate --noinput'
-#     subnets: subnet-aaa,subnet-bbb       # required when migrate==true
-#     security_groups: sg-aaa              # required when migrate==true
+#     subnets: subnet-aaa,subnet-bbb       # required when migrate==true (comma-separated, no spaces)
+#     security_groups: sg-aaa              # required when migrate==true (comma-separated, no spaces)
+#     wait_for_minutes: 10                 # optional; max minutes to wait for ECS service stability
 #     # --- amplify inputs (legacy template path) ---
 #     amplify_app_id: d123...
 #     amplify_branch: develop
@@ -121,6 +122,12 @@ jobs:
           aws-region: ${{ inputs.aws_region }}
 
       # ---------------- AMPLIFY (legacy, unchanged behavior) ----------------
+      - name: Set up Node (amplify path)
+        if: ${{ inputs.mode == 'amplify' }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+          cache: npm
       - name: Run DB migrations before shifting traffic (amplify/prisma)
         if: ${{ inputs.mode == 'amplify' && inputs.migrate_before_traffic }}
         run: |
@@ -230,9 +237,11 @@ jobs:
             --cli-input-json "file://${RENDERED_TD}" \
             --query 'taskDefinition.taskDefinitionArn' --output text)
           echo "Registered migration task def: $NEW_TD_ARN"
-          CMD_JSON=$(printf '%s' "$MIGRATE_COMMAND" | jq -Rc 'split(" ")')
+          CMD_JSON=$(printf '%s' "$MIGRATE_COMMAND" | jq -Rc 'split(" ") | map(select(length > 0))')
           OVERRIDES=$(jq -nc --arg name "$CONTAINER" --argjson cmd "$CMD_JSON" \
             '{containerOverrides:[{name:$name,command:$cmd}]}')
+          SUBNETS="${SUBNETS// /}"
+          SECURITY_GROUPS="${SECURITY_GROUPS// /}"
           NETCFG="awsvpcConfiguration={subnets=[${SUBNETS}],securityGroups=[${SECURITY_GROUPS}],assignPublicIp=DISABLED}"
           TASK_ARN=$(aws ecs run-task \
             --cluster "$CLUSTER" \
@@ -242,7 +251,8 @@ jobs:
             --overrides "$OVERRIDES" \
             --query 'tasks[0].taskArn' --output text)
           echo "Migration task: $TASK_ARN — waiting for it to stop..."
-          aws ecs wait tasks-stopped --cluster "$CLUSTER" --tasks "$TASK_ARN"
+          aws ecs wait tasks-stopped --cluster "$CLUSTER" --tasks "$TASK_ARN" \
+            || { echo "::error::Migration task did not stop within the wait window"; exit 1; }
           EXIT_CODE=$(aws ecs describe-tasks \
             --cluster "$CLUSTER" --tasks "$TASK_ARN" \
             --query "tasks[0].containers[?name=='${CONTAINER}'].exitCode | [0]" \
@@ -253,6 +263,10 @@ jobs:
             exit 1
           fi
 
+      # When migrate=true the migration step already registered the rendered task def (rev N+1);
+      # this action registers the byte-identical rendered JSON again (N+2) and rolls the service
+      # to it — so the service runs exactly the image the migration validated. The extra revision
+      # is cosmetic, not a correctness gap.
       - name: Deploy service and wait for steady-state
         if: ${{ inputs.mode == 'fargate' || inputs.mode == 'fargate-leader' }}
         uses: aws-actions/amazon-ecs-deploy-task-definition@v2
