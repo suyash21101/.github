@@ -22,5 +22,9 @@ assert_contains "$F" 'setup-node' "setup-node present for amplify npm ci path"
 assert_absent  "$F" 'Fargate deploy not yet implemented' "no fargate placeholder remains"
 # fargate-leader handled
 assert_contains "$F" 'fargate-leader' "handles fargate-leader mode"
+# fargate-leader must NOT trigger the migration step: the migration step's guard
+# is mode == 'fargate' (exact), never fargate-leader.
+assert_contains "$F" "inputs.mode == 'fargate' && inputs.migrate" "migration guarded to fargate (not leader)"
+assert_absent  "$F" "inputs.mode == 'fargate-leader' && inputs.migrate" "leader never migrates"
 
 done_ok
