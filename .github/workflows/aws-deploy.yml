@@ -1,17 +1,34 @@
-# Reusable module: deploy to AWS via GitHub OIDC (no long-lived keys). See docs/AWS_INFRA_SETUP.md.
-#   uses: suyash21101/.github/.github/workflows/aws-deploy.yml@v1
+# Reusable module: deploy to AWS via GitHub OIDC (no long-lived keys).
+#   uses: suyash21101/.github/.github/workflows/aws-deploy.yml@v1.2.0
 #   with:
-#     environment: int            # int | uat | prod
-#     aws_region: eu-west-1
+#     environment: int
+#     aws_region: ap-south-1
 #     role_to_assume: arn:aws:iam::<acct>:role/<env>-deploy
-#     mode: amplify               # amplify | fargate
-#     amplify_app_id: d123...      # required when mode == amplify
+#     mode: fargate              # amplify | fargate | fargate-leader
+#     # --- fargate / fargate-leader inputs ---
+#     cluster: quantlab-int
+#     service: django-web
+#     container: web             # container name inside the task def to update
+#     image: <acct>.dkr.ecr.ap-south-1.amazonaws.com/quantlab/web:sha-abc123
+#     migrate: true              # fargate only; runs one-shot migration before traffic
+#     migrate_command: 'python manage.py migrate --noinput'
+#     subnets: subnet-aaa,subnet-bbb       # required when migrate==true (comma-separated, no spaces)
+#     security_groups: sg-aaa              # required when migrate==true (comma-separated, no spaces)
+#     wait_for_minutes: 10                 # optional; max minutes to wait for ECS service stability
+#     # --- amplify inputs (legacy template path) ---
+#     amplify_app_id: d123...
 #     amplify_branch: develop
-#     migrate_before_traffic: true
-#   secrets: inherit              # needs DATABASE_URL on the consumer repo (for migrations)
+#   secrets: inherit            # DATABASE_URL only needed by the legacy amplify+prisma path
 #
-# OIDC trust: the deploy role's trust policy must be scoped to this repo + branch
-# (repo:OWNER/REPO:ref:refs/heads/<branch>) per AWS_INFRA_SETUP.md §6.
+# Modes:
+#   amplify        — legacy Node/Amplify path (prisma migrate + start-job). Unchanged.
+#   fargate        — Django on ECS: one-shot `manage.py migrate` task -> register new task-def
+#                    revision with the new image -> update service -> wait steady-state.
+#   fargate-leader — scalping engine: roll the service at desiredCount>=1 (the S3 leader lease
+#                    serializes order placement, so a rolling deploy is safe). No migration.
+#
+# OIDC trust: role trust policy scoped to repo:OWNER/REPO:ref:refs/heads/<branch>
+# per docs/AWS_INFRA_SETUP.md §6.
 name: aws-deploy (module)
 
 on:
@@ -29,7 +46,43 @@ on:
       mode:
         type: string
         required: false
-        default: amplify
+        default: fargate
+      cluster:
+        type: string
+        required: false
+        default: ""
+      service:
+        type: string
+        required: false
+        default: ""
+      container:
+        type: string
+        required: false
+        default: ""
+      image:
+        type: string
+        required: false
+        default: ""
+      migrate:
+        type: boolean
+        required: false
+        default: false
+      migrate_command:
+        type: string
+        required: false
+        default: "python manage.py migrate --noinput"
+      subnets:
+        type: string
+        required: false
+        default: ""
+      security_groups:
+        type: string
+        required: false
+        default: ""
+      wait_for_minutes:
+        type: number
+        required: false
+        default: 10
       amplify_app_id:
         type: string
         required: false
@@ -56,7 +109,7 @@ permissions:
 
 jobs:
   run:
-    name: Deploy (${{ inputs.environment }})
+    name: Deploy (${{ inputs.environment }} / ${{ inputs.mode }})
     runs-on: ubuntu-latest
     environment: ${{ inputs.environment }}
     steps:
@@ -68,13 +121,15 @@ jobs:
           role-to-assume: ${{ inputs.role_to_assume }}
           aws-region: ${{ inputs.aws_region }}
 
-      - uses: actions/setup-node@v4
+      # ---------------- AMPLIFY (legacy, unchanged behavior) ----------------
+      - name: Set up Node (amplify path)
+        if: ${{ inputs.mode == 'amplify' }}
+        uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node_version }}
           cache: npm
-
-      - name: Run DB migrations before shifting traffic
-        if: ${{ inputs.migrate_before_traffic }}
+      - name: Run DB migrations before shifting traffic (amplify/prisma)
+        if: ${{ inputs.mode == 'amplify' && inputs.migrate_before_traffic }}
         run: |
           npm ci
           npx prisma migrate deploy
@@ -83,21 +138,24 @@ jobs:
 
       - name: Trigger Amplify deployment
         if: ${{ inputs.mode == 'amplify' }}
+        env:
+          AMPLIFY_APP_ID: ${{ inputs.amplify_app_id }}
+          AMPLIFY_BRANCH: ${{ inputs.amplify_branch }}
         run: |
-          if [ -z "${{ inputs.amplify_app_id }}" ] || [ -z "${{ inputs.amplify_branch }}" ]; then
+          if [ -z "$AMPLIFY_APP_ID" ] || [ -z "$AMPLIFY_BRANCH" ]; then
             echo "::error::mode=amplify requires amplify_app_id and amplify_branch"
             exit 1
           fi
           JOB_ID=$(aws amplify start-job \
-            --app-id "${{ inputs.amplify_app_id }}" \
-            --branch-name "${{ inputs.amplify_branch }}" \
+            --app-id "$AMPLIFY_APP_ID" \
+            --branch-name "$AMPLIFY_BRANCH" \
             --job-type RELEASE \
             --query 'jobSummary.jobId' --output text)
           echo "Started Amplify job $JOB_ID; waiting for completion..."
           while true; do
             STATUS=$(aws amplify get-job \
-              --app-id "${{ inputs.amplify_app_id }}" \
-              --branch-name "${{ inputs.amplify_branch }}" \
+              --app-id "$AMPLIFY_APP_ID" \
+              --branch-name "$AMPLIFY_BRANCH" \
               --job-id "$JOB_ID" \
               --query 'job.summary.status' --output text)
             echo "Amplify job status: $STATUS"
@@ -108,8 +166,113 @@ jobs:
             esac
           done
 
-      - name: Fargate deploy placeholder
-        if: ${{ inputs.mode == 'fargate' }}
+      # ---------------- FARGATE / FARGATE-LEADER (Django on ECS) ----------------
+      - name: Validate fargate inputs
+        if: ${{ inputs.mode == 'fargate' || inputs.mode == 'fargate-leader' }}
+        env:
+          MODE: ${{ inputs.mode }}
+          CLUSTER: ${{ inputs.cluster }}
+          SERVICE: ${{ inputs.service }}
+          CONTAINER: ${{ inputs.container }}
+          IMAGE: ${{ inputs.image }}
+          MIGRATE: ${{ inputs.migrate }}
+          SUBNETS: ${{ inputs.subnets }}
+          SECURITY_GROUPS: ${{ inputs.security_groups }}
         run: |
-          echo "::error::Fargate deploy not yet implemented in this module (see AWS_INFRA_SETUP.md §8)."
-          exit 1
+          missing=""
+          if [ -z "$CLUSTER" ]; then missing="$missing cluster"; fi
+          if [ -z "$SERVICE" ]; then missing="$missing service"; fi
+          if [ -z "$CONTAINER" ]; then missing="$missing container"; fi
+          if [ -z "$IMAGE" ]; then missing="$missing image"; fi
+          if [ -n "$missing" ]; then
+            echo "::error::mode=$MODE requires:$missing"
+            exit 1
+          fi
+          if [ "$MODE" = "fargate" ] && [ "$MIGRATE" = "true" ]; then
+            if [ -z "$SUBNETS" ] || [ -z "$SECURITY_GROUPS" ]; then
+              echo "::error::migrate=true requires subnets and security_groups"
+              exit 1
+            fi
+          fi
+
+      - name: Fetch current task definition
+        id: taskdef
+        if: ${{ inputs.mode == 'fargate' || inputs.mode == 'fargate-leader' }}
+        env:
+          CLUSTER: ${{ inputs.cluster }}
+          SERVICE: ${{ inputs.service }}
+        run: |
+          TD_ARN=$(aws ecs describe-services \
+            --cluster "$CLUSTER" \
+            --services "$SERVICE" \
+            --query 'services[0].taskDefinition' --output text)
+          echo "Current task def: $TD_ARN"
+          aws ecs describe-task-definition \
+            --task-definition "$TD_ARN" \
+            --query 'taskDefinition' --output json \
+          | jq 'del(.taskDefinitionArn,.revision,.status,.requiresAttributes,.compatibilities,.registeredAt,.registeredBy,.deregisteredAt)' \
+            > taskdef.json
+          echo "path=taskdef.json" >> "$GITHUB_OUTPUT"
+
+      - name: Render new image into task definition
+        id: render
+        if: ${{ inputs.mode == 'fargate' || inputs.mode == 'fargate-leader' }}
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: ${{ steps.taskdef.outputs.path }}
+          container-name: ${{ inputs.container }}
+          image: ${{ inputs.image }}
+
+      - name: Run one-shot migration task
+        if: ${{ inputs.mode == 'fargate' && inputs.migrate }}
+        env:
+          CLUSTER: ${{ inputs.cluster }}
+          CONTAINER: ${{ inputs.container }}
+          SUBNETS: ${{ inputs.subnets }}
+          SECURITY_GROUPS: ${{ inputs.security_groups }}
+          MIGRATE_COMMAND: ${{ inputs.migrate_command }}
+          RENDERED_TD: ${{ steps.render.outputs.task-definition }}
+        run: |
+          NEW_TD_ARN=$(aws ecs register-task-definition \
+            --cli-input-json "file://${RENDERED_TD}" \
+            --query 'taskDefinition.taskDefinitionArn' --output text)
+          echo "Registered migration task def: $NEW_TD_ARN"
+          CMD_JSON=$(printf '%s' "$MIGRATE_COMMAND" | jq -Rc 'split(" ") | map(select(length > 0))')
+          OVERRIDES=$(jq -nc --arg name "$CONTAINER" --argjson cmd "$CMD_JSON" \
+            '{containerOverrides:[{name:$name,command:$cmd}]}')
+          SUBNETS="${SUBNETS// /}"
+          SECURITY_GROUPS="${SECURITY_GROUPS// /}"
+          NETCFG="awsvpcConfiguration={subnets=[${SUBNETS}],securityGroups=[${SECURITY_GROUPS}],assignPublicIp=DISABLED}"
+          TASK_ARN=$(aws ecs run-task \
+            --cluster "$CLUSTER" \
+            --launch-type FARGATE \
+            --task-definition "$NEW_TD_ARN" \
+            --network-configuration "$NETCFG" \
+            --overrides "$OVERRIDES" \
+            --query 'tasks[0].taskArn' --output text)
+          echo "Migration task: $TASK_ARN — waiting for it to stop..."
+          aws ecs wait tasks-stopped --cluster "$CLUSTER" --tasks "$TASK_ARN" \
+            || { echo "::error::Migration task did not stop within the wait window"; exit 1; }
+          EXIT_CODE=$(aws ecs describe-tasks \
+            --cluster "$CLUSTER" --tasks "$TASK_ARN" \
+            --query "tasks[0].containers[?name=='${CONTAINER}'].exitCode | [0]" \
+            --output text)
+          echo "Migration exit code: $EXIT_CODE"
+          if [ "$EXIT_CODE" != "0" ]; then
+            echo "::error::Migration task exited non-zero ($EXIT_CODE) — aborting deploy"
+            exit 1
+          fi
+
+      # When migrate=true the migration step already registered the rendered task def (rev N+1);
+      # this action registers the byte-identical rendered JSON again (N+2) and rolls the service
+      # to it — so the service runs exactly the image the migration validated. The extra revision
+      # is cosmetic, not a correctness gap.
+      - name: Deploy service and wait for steady-state
+        if: ${{ inputs.mode == 'fargate' || inputs.mode == 'fargate-leader' }}
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.render.outputs.task-definition }}
+          service: ${{ inputs.service }}
+          cluster: ${{ inputs.cluster }}
+          wait-for-service-stability: true
+          wait-for-minutes: ${{ inputs.wait_for_minutes }}
