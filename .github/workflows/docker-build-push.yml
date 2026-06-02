@@ -1,0 +1,107 @@
+# Reusable module: build a Docker image and push it to Amazon ECR via GitHub OIDC.
+#   uses: suyash21101/.github/.github/workflows/docker-build-push.yml@v1.2.0
+#   with:
+#     environment: int
+#     aws_region: ap-south-1
+#     role_to_assume: arn:aws:iam::<acct>:role/<env>-deploy
+#     ecr_repository: quantlab/web    # repo must already exist (created by infra/IaC)
+#     dockerfile: Dockerfile
+#     build_context: .
+#     image_tag: ""                   # default: sha-<short-commit>
+#   Outputs: image_uri (full URI incl tag), image_tag.
+#
+# OIDC trust: the role's trust policy must allow repo:OWNER/REPO:ref:refs/heads/<branch>
+# per docs/AWS_INFRA_SETUP.md §6. No long-lived AWS keys are used.
+name: docker-build-push (module)
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        type: string
+        required: true
+      aws_region:
+        type: string
+        required: true
+      role_to_assume:
+        type: string
+        required: true
+      ecr_repository:
+        type: string
+        required: true
+      dockerfile:
+        type: string
+        required: false
+        default: Dockerfile
+      build_context:
+        type: string
+        required: false
+        default: "."
+      image_tag:
+        type: string
+        required: false
+        default: ""
+      build_args:
+        type: string
+        required: false
+        default: ""
+    outputs:
+      image_uri:
+        description: Full image URI including tag
+        value: ${{ jobs.run.outputs.image_uri }}
+      image_tag:
+        description: Tag applied to the image
+        value: ${{ jobs.run.outputs.image_tag }}
+
+permissions:
+  id-token: write   # required for OIDC
+  contents: read
+
+jobs:
+  run:
+    name: Build & push (${{ inputs.ecr_repository }})
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    outputs:
+      image_uri: ${{ steps.meta.outputs.image_uri }}
+      image_tag: ${{ steps.meta.outputs.image_tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ inputs.role_to_assume }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Log in to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Resolve image tag and URI
+        id: meta
+        run: |
+          TAG="${{ inputs.image_tag }}"
+          if [ -z "$TAG" ]; then
+            TAG="sha-$(echo "${{ github.sha }}" | cut -c1-12)"
+          fi
+          REGISTRY="${{ steps.ecr.outputs.registry }}"
+          URI="${REGISTRY}/${{ inputs.ecr_repository }}:${TAG}"
+          {
+            echo "image_tag=${TAG}"
+            echo "image_uri=${URI}"
+          } >> "$GITHUB_OUTPUT"
+          echo "Building ${URI}"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ inputs.build_context }}
+          file: ${{ inputs.dockerfile }}
+          push: true
+          tags: ${{ steps.meta.outputs.image_uri }}
+          build-args: ${{ inputs.build_args }}
+          provenance: false
