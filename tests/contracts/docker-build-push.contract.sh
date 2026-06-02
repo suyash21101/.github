@@ -15,6 +15,8 @@ assert_contains "$F" 'id-token: write' "requests OIDC id-token"
 assert_contains "$F" 'aws-actions/configure-aws-credentials@v4' "uses OIDC credential action"
 assert_contains "$F" 'aws-actions/amazon-ecr-login@v2' "logs into ECR"
 assert_contains "$F" 'docker/build-push-action@v6' "builds & pushes via buildx action"
+assert_contains "$F" 'provenance: false' "disables provenance attestation (ECR compatibility)"
+assert_contains "$F" 'build_args:' "declares build_args input"
 # sha-<commit> default tag + outputs
 assert_contains "$F" 'sha-' "defaults image tag to sha-<commit>"
 assert_contains "$F" 'image_uri:' "exposes image_uri output"

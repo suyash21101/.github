@@ -8,6 +8,8 @@
 #     dockerfile: Dockerfile
 #     build_context: .
 #     image_tag: ""                   # default: sha-<short-commit>
+#     build_args: |                   # optional; newline-separated KEY=VALUE pairs
+#       NODE_ENV=production
 #   Outputs: image_uri (full URI incl tag), image_tag.
 #
 # OIDC trust: the role's trust policy must allow repo:OWNER/REPO:ref:refs/heads/<branch>
@@ -80,13 +82,16 @@ jobs:
 
       - name: Resolve image tag and URI
         id: meta
+        env:
+          IMAGE_TAG_INPUT: ${{ inputs.image_tag }}
+          ECR_REPO: ${{ inputs.ecr_repository }}
         run: |
-          TAG="${{ inputs.image_tag }}"
+          TAG="${IMAGE_TAG_INPUT}"
           if [ -z "$TAG" ]; then
             TAG="sha-$(echo "${{ github.sha }}" | cut -c1-12)"
           fi
           REGISTRY="${{ steps.ecr.outputs.registry }}"
-          URI="${REGISTRY}/${{ inputs.ecr_repository }}:${TAG}"
+          URI="${REGISTRY}/${ECR_REPO}:${TAG}"
           {
             echo "image_tag=${TAG}"
             echo "image_uri=${URI}"
