@@ -75,6 +75,13 @@ on:
         type: string
         required: false
         default: ""
+      assign_public_ip:
+        # ENABLED is required for the one-shot migration task in VPCs without a
+        # NAT path (e.g. default VPC): Fargate needs outbound reach to pull the
+        # image and fetch task-def secrets. Default preserves prior behavior.
+        type: string
+        required: false
+        default: "DISABLED"
       security_groups:
         type: string
         required: false
@@ -230,6 +237,7 @@ jobs:
           CONTAINER: ${{ inputs.container }}
           SUBNETS: ${{ inputs.subnets }}
           SECURITY_GROUPS: ${{ inputs.security_groups }}
+          ASSIGN_PUBLIC_IP: ${{ inputs.assign_public_ip }}
           MIGRATE_COMMAND: ${{ inputs.migrate_command }}
           RENDERED_TD: ${{ steps.render.outputs.task-definition }}
         run: |
@@ -242,7 +250,7 @@ jobs:
             '{containerOverrides:[{name:$name,command:$cmd}]}')
           SUBNETS="${SUBNETS// /}"
           SECURITY_GROUPS="${SECURITY_GROUPS// /}"
-          NETCFG="awsvpcConfiguration={subnets=[${SUBNETS}],securityGroups=[${SECURITY_GROUPS}],assignPublicIp=DISABLED}"
+          NETCFG="awsvpcConfiguration={subnets=[${SUBNETS}],securityGroups=[${SECURITY_GROUPS}],assignPublicIp=${ASSIGN_PUBLIC_IP}}"
           TASK_ARN=$(aws ecs run-task \
             --cluster "$CLUSTER" \
             --launch-type FARGATE \
